@@ -1,0 +1,25 @@
+{
+    "files": [],
+    "references": [
+      { "path": "./backend" },
+      { "path": "./scraper" },
+      { "path": "./frontend" }
+    ],
+    "compilerOptions": {
+      "composite": true,
+      "declaration": true,
+      "declarationMap": true,
+      "outDir": "dist",
+      "module": "commonjs",
+      "target": "es2020",
+      "moduleResolution": "node",
+      "baseUrl": ".",
+      "paths": {
+        "*": ["node_modules/*"]
+      },
+      "strict": true,
+      "esModuleInterop": true,
+      "skipLibCheck": true
+    }
+  }
+  
