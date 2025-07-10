@@ -1,4 +1,5 @@
 import puppeteer, { Browser, Page } from 'puppeteer';
+import fetch from 'node-fetch';
 import { RankedTeam, TeamScrapingResult } from './types';
 import { handleCookieDialog, setupPage } from './utils';
 import cron from 'node-cron';
@@ -11,14 +12,45 @@ const CONFIG = {
     retryAttempts: parseInt(process.env.RETRY_ATTEMPTS || '3'),
     retryDelay: parseInt(process.env.RETRY_DELAY || '60000'), // 1 minute
     cronSchedule: '0 0 */24 * * *', // Run every 24 hours at midnight
+    backendUrl: process.env.BACKEND_URL || 'http://localhost:3000',
     get rankingUrl() {
         return `${this.baseUrl}${this.rankingPath}`;
     }
 } as const;
 
+interface BackendResponse {
+    success: boolean;
+    message: string;
+    timestamp?: string;
+}
+
 // Abstracted browser setup
 async function setupBrowser(): Promise<Browser> {
     return await puppeteer.launch({ headless: true });
+}
+
+// Function to send teams to backend API
+async function sendTeamsToBackend(result: TeamScrapingResult): Promise<void> {
+    try {
+        console.log('\n[Teams Scraper] 📤 Sending teams to backend...');
+        const response = await fetch(`${CONFIG.backendUrl}/api/teams`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(result),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Backend API responded with status: ${response.status}`);
+        }
+
+        const responseData = await response.json() as BackendResponse;
+        console.log('[Teams Scraper] ✅ Successfully sent teams to backend:', responseData.message);
+    } catch (error) {
+        console.error('[Teams Scraper] ❌ Failed to send teams to backend:', error);
+        throw error;
+    }
 }
 
 // Main team scraping function
@@ -28,7 +60,7 @@ export async function scrapeHLTVTeams(): Promise<TeamScrapingResult> {
     await setupPage(page);
     
     try {
-        console.log(`[${new Date().toISOString()}] Starting HLTV team rankings scrape...`);
+        console.log('\n[Teams Scraper] 🔍 Starting HLTV team rankings scrape...');
         
         await page.goto(CONFIG.rankingUrl, { waitUntil: 'networkidle0' });
         await handleCookieDialog(page);
@@ -73,13 +105,15 @@ export async function scrapeHLTVTeams(): Promise<TeamScrapingResult> {
             });
         });
 
+        console.log(`[Teams Scraper] ✅ Successfully scraped ${teams.length} teams`);
+        
         return {
             teams,
             timestamp: new Date().toISOString()
         };
         
     } catch (error) {
-        console.error('Error scraping HLTV team rankings:', error);
+        console.error('[Teams Scraper] ❌ Error scraping HLTV team rankings:', error);
         throw error;
     } finally {
         await browser.close();
@@ -94,24 +128,22 @@ export async function runTeamScrapeWithErrorHandling(): Promise<void> {
     while (attempts < CONFIG.retryAttempts && !success) {
         try {
             const result = await scrapeHLTVTeams();
-            // Log full team data
-            console.log('Scraped Team Rankings:');
-            console.log(JSON.stringify(result.teams, null, 2));
-            console.log(`Successfully scraped ${result.teams.length} team rankings`);
+            // Send teams to backend
+            await sendTeamsToBackend(result);
             success = true;
         } catch (error) {
             attempts++;
-            console.error(`Attempt ${attempts} failed:`, error);
+            console.error(`[Teams Scraper] ❌ Attempt ${attempts} failed:`, error);
             
             if (attempts < CONFIG.retryAttempts) {
-                console.log(`Retrying in ${CONFIG.retryDelay / 1000} seconds...`);
+                console.log(`[Teams Scraper] 🔄 Retrying in ${CONFIG.retryDelay / 1000} seconds...`);
                 await new Promise(resolve => setTimeout(resolve, CONFIG.retryDelay));
             }
         }
     }
 
     if (!success) {
-        console.error(`Failed to scrape team rankings after ${CONFIG.retryAttempts} attempts`);
+        console.error(`[Teams Scraper] ❌ Failed to scrape team rankings after ${CONFIG.retryAttempts} attempts`);
     }
 }
 
@@ -124,9 +156,9 @@ export function startTeamRankingsCron(): void {
     }
     
     cronJob = cron.schedule(CONFIG.cronSchedule, async () => {
-        console.log('Running scheduled team rankings scrape...');
+        console.log('\n[Teams Scraper] ⏰ Running scheduled team rankings scrape...');
         await runTeamScrapeWithErrorHandling();
     });
     
-    console.log(`Team rankings scraper scheduled to run ${CONFIG.cronSchedule}`);
+    console.log(`[Teams Scraper] 📅 Scraper scheduled to run ${CONFIG.cronSchedule}`);
 } 
