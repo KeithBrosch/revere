@@ -143,15 +143,16 @@ export async function scrapeHLTVMatches(): Promise<ScrapingResult> {
 }
 
 // Error handling wrapper
-export async function runMatchScrapeWithErrorHandling(): Promise<void> {
+export async function runMatchScrapeWithErrorHandling(): Promise<ScrapingResult | null> {
     let attempts = 0;
     let success = false;
+    let finalResult: ScrapingResult | null = null;
 
     while (attempts < CONFIG.retryAttempts && !success) {
         try {
             const result = await scrapeHLTVMatches();
-            // Here you would typically save or process the result
             console.log(`Successfully scraped ${result.matches.length} matches`);
+            finalResult = result;
             success = true;
         } catch (error) {
             attempts++;
@@ -167,4 +168,6 @@ export async function runMatchScrapeWithErrorHandling(): Promise<void> {
     if (!success) {
         console.error(`Failed to scrape matches after ${CONFIG.retryAttempts} attempts`);
     }
+
+    return finalResult;
 } 

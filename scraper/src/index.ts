@@ -2,46 +2,63 @@ import cron from 'node-cron';
 import dotenv from 'dotenv';
 import { runMatchScrapeWithErrorHandling } from './matches';
 import { runTeamScrapeWithErrorHandling, startTeamRankingsCron } from './teams';
+import { calculatePollingInterval, POLLING_INTERVALS } from './utils';
+import { ParsedMatch, ScrapingResult } from './types';
 
 // Load environment variables
 dotenv.config();
 
-// Configuration
-const CONFIG = {
-    matchCronSchedule: process.env.MATCH_CRON_SCHEDULE || '*/30 * * * *', // Every 30 minutes by default
-} as const;
-
-// Health monitoring
+// Scraper state
 let lastRunTime: Date | null = null;
 let consecutiveFailures = 0;
 let isRunning = false;
-let matchCronJob: cron.ScheduledTask | null = null;
+let matchTimeout: NodeJS.Timeout | null = null;
+let lastScrapedMatches: ParsedMatch[] = [];
 
 // Health status check
 function getHealthStatus(): void {
     const now = new Date();
     const lastRun = lastRunTime ? `${Math.round((now.getTime() - lastRunTime.getTime()) / 1000 / 60)} minutes ago` : 'never';
+    const nextPollInterval = lastScrapedMatches.length > 0 ? 
+        Math.round(calculatePollingInterval(lastScrapedMatches) / 1000 / 60) : 
+        Math.round(POLLING_INTERVALS.DEFAULT / 1000 / 60);
     
     console.log({
         status: isRunning ? 'running' : 'idle',
         lastRun,
         consecutiveFailures,
-        isHealthy: consecutiveFailures < 3
+        isHealthy: consecutiveFailures < 3,
+        nextPollIn: `${nextPollInterval} minutes`
     });
 }
 
-// Restart cron job
-function restartMatchCronJob(): void {
-    if (matchCronJob) {
-        matchCronJob.stop();
+// Schedule next match scrape
+async function scheduleNextMatchScrape(): Promise<void> {
+    if (matchTimeout) {
+        clearTimeout(matchTimeout);
     }
-    
-    matchCronJob = cron.schedule(CONFIG.matchCronSchedule, async () => {
-        console.log('Running scheduled match scrape...');
-        await runMatchScrapeWithErrorHandling();
-    });
-    
-    console.log(`Match scraper scheduled to run ${CONFIG.matchCronSchedule}`);
+
+    const interval = calculatePollingInterval(lastScrapedMatches);
+    console.log(`Scheduling next match scrape in ${Math.round(interval / 1000 / 60)} minutes`);
+
+    matchTimeout = setTimeout(async () => {
+        try {
+            const result = await runMatchScrapeWithErrorHandling();
+            if (result?.matches) {
+                lastScrapedMatches = result.matches;
+                consecutiveFailures = 0;
+            } else {
+                consecutiveFailures++;
+            }
+            lastRunTime = new Date();
+        } catch (error) {
+            console.error('Error in scheduled match scrape:', error);
+            consecutiveFailures++;
+        } finally {
+            isRunning = false;
+            await scheduleNextMatchScrape();
+        }
+    }, interval);
 }
 
 // Manual trigger
@@ -52,7 +69,23 @@ async function triggerManualRun(): Promise<void> {
     }
     
     console.log('Manually triggering scrape...');
-    await runMatchScrapeWithErrorHandling();
+    isRunning = true;
+    try {
+        const result = await runMatchScrapeWithErrorHandling();
+        if (result?.matches) {
+            lastScrapedMatches = result.matches;
+            consecutiveFailures = 0;
+        } else {
+            consecutiveFailures++;
+        }
+        lastRunTime = new Date();
+    } catch (error) {
+        console.error('Error in manual scrape:', error);
+        consecutiveFailures++;
+    } finally {
+        isRunning = false;
+        await scheduleNextMatchScrape();
+    }
 }
 
 // Start both scrapers
@@ -62,27 +95,40 @@ async function startScrapers(): Promise<void> {
     // Run both scrapers immediately
     console.log('Running initial scrapes...');
     try {
-        await Promise.all([
+        const [matchResult, teamResult] = await Promise.all([
             runMatchScrapeWithErrorHandling(),
             runTeamScrapeWithErrorHandling()
         ]);
+        
+        if (matchResult?.matches) {
+            lastScrapedMatches = matchResult.matches;
+        }
+        
         console.log('Initial scrapes completed successfully');
     } catch (error) {
         console.error('Error during initial scrapes:', error);
     }
     
     // Set up scheduled runs
-    console.log('Setting up scheduled runs...');
-    restartMatchCronJob();
+    await scheduleNextMatchScrape();
     startTeamRankingsCron();
     
     console.log('Both scrapers started and scheduled successfully');
 }
 
-// Export functions for external use
+// Cleanup function
+function cleanup(): void {
+    if (matchTimeout) {
+        clearTimeout(matchTimeout);
+    }
+}
+
+// Handle process termination
+process.on('SIGTERM', cleanup);
+process.on('SIGINT', cleanup);
+
 export {
     getHealthStatus,
-    restartMatchCronJob,
     triggerManualRun,
     startScrapers
 };
