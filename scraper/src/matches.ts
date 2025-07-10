@@ -1,6 +1,6 @@
 import puppeteer, { Browser, Page } from 'puppeteer';
 import { MatchMetadata, ParsedMatch, ScrapingResult } from './types';
-import { handleCookieDialog, setupPage } from './utils';
+import { handleCookieDialog, setupPage, SCRAPE_INTERVAL } from './utils';
 
 // Configuration object for better maintainability
 const CONFIG = {
@@ -29,8 +29,6 @@ export async function scrapeHLTVMatches(): Promise<ScrapingResult> {
     await setupPage(page);
     
     try {
-        console.log(`[${new Date().toISOString()}] Starting HLTV matches scrape...`);
-        
         await page.goto(CONFIG.matchesUrl, { waitUntil: 'networkidle0' });
         await handleCookieDialog(page);
         await new Promise(resolve => setTimeout(resolve, CONFIG.waitTime));
@@ -51,18 +49,19 @@ export async function scrapeHLTVMatches(): Promise<ScrapingResult> {
                     const stars = parseInt(matchWrapper.getAttribute('data-stars') || '0');
                     
                     const matchElement = matchWrapper.querySelector('.match');
-                    const matchLink = matchElement?.querySelector('a[href*="/matches/"]')?.getAttribute('href');
+                    const matchBottomElement = matchElement?.querySelector('.match-bottom');
+                    const matchLink = matchBottomElement?.querySelector('a.match-info')?.getAttribute('href');
                     const matchUrl = matchLink ? `https://www.hltv.org${matchLink}` : null;
                     
-                    const timeElement = matchElement?.querySelector('.match-time');
+                    const timeElement = matchBottomElement?.querySelector('.match-time');
                     const matchTime = timeElement?.textContent?.trim() || null;
                     const unixTime = timeElement?.getAttribute('data-unix');
                     const timeFormat = timeElement?.getAttribute('data-time-format') || null;
                     
-                    const matchMeta = matchElement?.querySelector('.match-meta')?.textContent?.trim() || null;
+                    const matchMeta = matchBottomElement?.querySelector('.match-meta')?.textContent?.trim() || null;
                     
-                    const team1Element = matchElement?.querySelector('.team1');
-                    const team2Element = matchElement?.querySelector('.team2');
+                    const team1Element = matchBottomElement?.querySelector('.team1');
+                    const team2Element = matchBottomElement?.querySelector('.team2');
                     
                     const team1 = {
                         id: team1Id,
@@ -80,10 +79,10 @@ export async function scrapeHLTVMatches(): Promise<ScrapingResult> {
                         title: team2Element?.querySelector('.match-team-logo')?.getAttribute('title') || null
                     };
                     
-                    const matchStageElement = matchElement?.querySelector('.match-stage');
+                    const matchStageElement = matchBottomElement?.querySelector('.match-stage');
                     const matchStage = matchStageElement && matchStageElement.className ? matchStageElement.className.replace('match-stage ', '').trim() : null;
                     
-                    const analyticsLink = matchElement?.querySelector('.match-analytics-btn')?.getAttribute('href');
+                    const analyticsLink = matchBottomElement?.querySelector('.match-analytics-btn')?.getAttribute('href');
                     const analyticsUrl = analyticsLink ? `https://www.hltv.org${analyticsLink}` : null;
                     
                     return {
@@ -111,31 +110,121 @@ export async function scrapeHLTVMatches(): Promise<ScrapingResult> {
                 }
             }
 
-            const matchWrappers = Array.from(document.querySelectorAll('.liveMatch-container, .upcomingMatch'));
+            const matchWrappers = Array.from(document.querySelectorAll('.match-wrapper'));
+            
             const parsedMatches: ParsedMatch[] = [];
             
-            for (const wrapper of matchWrappers) {
-                const matchData = parseMatchHtml(wrapper);
-                if (matchData) {
-                    const eventName = wrapper.closest('.match-day')?.querySelector('.standard-headline')?.textContent?.trim() || '';
-                    parsedMatches.push({
-                        ...matchData,
-                        eventName,
-                        html: wrapper.outerHTML
-                    });
+            // Get all match sections
+            const matchSections = Array.from(document.querySelectorAll('.matches-list-section'));
+            
+            // Get today's date for comparison
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const tomorrow = new Date(today);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            
+            for (const section of matchSections) {
+                // Get the date from the section headline (e.g. "Thursday - 2025-07-10")
+                const dateText = section.querySelector('.matches-list-headline')?.textContent?.trim() || '';
+                const dateMatch = dateText.match(/(\d{4})-(\d{2})-(\d{2})/);
+                
+                if (!dateMatch) continue;
+
+                const [_, year, month, day] = dateMatch;
+                
+                // Create a Date object for this section's date
+                const sectionDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+                
+                // Skip if not today (unless it's near midnight and we're looking at tomorrow)
+                const isToday = sectionDate.getTime() === today.getTime();
+                const isTomorrowAndNearMidnight = sectionDate.getTime() === tomorrow.getTime() && 
+                                                now.getHours() >= 23;
+                
+                if (!isToday && !isTomorrowAndNearMidnight) continue;
+
+                const sectionMatches = Array.from(section.querySelectorAll('.match-wrapper'));
+
+                for (const wrapper of sectionMatches) {
+                    try {
+                        const matchData = parseMatchHtml(wrapper);
+                        if (matchData) {
+                            const eventName = wrapper.closest('.match-day')?.querySelector('.standard-headline')?.textContent?.trim() || '';
+
+                            // Get the time from the match (e.g. "10:00")
+                            const timeStr = matchData.matchTime || '00:00';
+                            const [hours, minutes] = timeStr.split(':').map(n => parseInt(n));
+                            
+                            // Create a Date object combining the section date with match time
+                            const matchDate = new Date(
+                                parseInt(year),
+                                parseInt(month) - 1,
+                                parseInt(day),
+                                hours,
+                                minutes
+                            );
+                            
+                            matchData.unixTime = Math.floor(matchDate.getTime() / 1000);
+
+                            parsedMatches.push({
+                                ...matchData,
+                                eventName,
+                                html: wrapper.outerHTML
+                            });
+                        }
+                    } catch (error) {
+                        continue;
+                    }
                 }
             }
             
             return parsedMatches;
         });
 
+        // Get current time and use fixed scrape interval
+        const now = Date.now();
+        const maxStartTime = now + SCRAPE_INTERVAL;
+
+        // Filter out matches with unknown teams
+        const matchesWithTeams = matches.filter(match => 
+            match.team1.name && match.team1.name !== 'Unknown' && 
+            match.team2.name && match.team2.name !== 'Unknown'
+        );
+
+        // Filter based on start time
+        const validMatches = matchesWithTeams.filter(match => {
+            if (!match.unixTime) return false;
+            const startTimeMs = match.unixTime * 1000;
+            return startTimeMs > now && startTimeMs <= maxStartTime;
+        });
+
+        if (validMatches.length > 0) {
+            console.log(`\nThese matches begin in the next ${SCRAPE_INTERVAL / 60000} minutes:`);
+            validMatches.forEach(match => {
+                const startTime = new Date(match.unixTime! * 1000);
+                const minutesUntilStart = Math.round((match.unixTime! * 1000 - now) / 60000);
+                console.log(`\n${match.team1.name} vs ${match.team2.name}`);
+                console.log(`Starts in: ${minutesUntilStart} minutes (${startTime.toLocaleTimeString()})`);
+                console.log(`Event: ${match.eventName}`);
+                console.log(`Format: ${match.matchFormat || 'Unknown'}`);
+                console.log(`Stage: ${match.matchStage || 'Unknown'}`);
+                console.log(`Match URL: ${match.matchUrl || 'Unknown'}`);
+                console.log(`Event Type: ${match.eventType || 'Unknown'}`);
+                console.log(`Region: ${match.region || 'Unknown'}`);
+                console.log(`Stars: ${match.stars}`);
+                console.log(`Is Live: ${match.isLive}`);
+                console.log(`Is LAN: ${match.isLan}`);
+                console.log(`Team 1: ${match.team1.name} (ID: ${match.team1.id})`);
+                console.log(`Team 2: ${match.team2.name} (ID: ${match.team2.id})`);
+            });
+        }
+
         return {
-            matches,
+            matches: validMatches || [],
             timestamp: new Date().toISOString()
         };
         
     } catch (error) {
-        console.error('Error scraping HLTV matches:', error);
+        console.error('Error during scraping:', error);
         throw error;
     } finally {
         await browser.close();

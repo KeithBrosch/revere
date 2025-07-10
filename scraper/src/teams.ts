@@ -39,7 +39,7 @@ export async function scrapeHLTVTeams(): Promise<TeamScrapingResult> {
             return teamElements.map((teamElement, index) => {
                 const rank = index + 1;
                 const pointsText = teamElement.querySelector('.points')?.textContent?.trim() || '0';
-                const points = parseInt(pointsText.replace(' points', '')) || 0;
+                const points = parseInt(pointsText.replace(/[^0-9]/g, '')) || 0;
                 
                 const changeElement = teamElement.querySelector('.change');
                 const changeText = changeElement?.textContent?.trim() || '0';
@@ -49,13 +49,15 @@ export async function scrapeHLTVTeams(): Promise<TeamScrapingResult> {
                 const teamNameElement = teamElement.querySelector('.teamLine .name');
                 const name = teamNameElement?.textContent?.trim() || null;
                 
-                const logoElement = teamElement.querySelector('.teamLine img.team-logo') as HTMLImageElement;
-                const logo = logoElement?.src || null;
-                const logoAlt = logoElement?.alt || null;
-                const title = logoElement?.title || null;
+                // Get team ID from the team profile link
+                const teamProfileLink = teamElement.querySelector('.more .moreLink[href^="/team/"]');
+                const teamId = teamProfileLink?.getAttribute('href')?.split('/')[2] || null;
                 
-                const teamLinkElement = teamElement.querySelector('.teamLine a[href*="/team/"]');
-                const teamId = teamLinkElement?.getAttribute('href')?.split('/').pop() || null;
+                // Get logo from the team logo image in ranking-header
+                const logoElement = teamElement.querySelector('.ranking-header .team-logo img');
+                const logo = logoElement?.getAttribute('src') || null;
+                const logoAlt = logoElement?.getAttribute('alt') || null;
+                const title = logoElement?.getAttribute('title') || null;
                 
                 return {
                     id: teamId,
